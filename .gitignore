@@ -1,0 +1,22 @@
+# Build outputs
+/matsrun
+/gomats
+
+# Go test binaries
+*.test
+*.out
+
+# Go workspace
+go.work
+
+# CI evidence
+ci-artifacts/
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

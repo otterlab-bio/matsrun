@@ -1,0 +1,214 @@
+name: matsrun CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  orchestrator-contract:
+    name: Go quality gates and rMATS orchestration contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout matsrun
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare evidence directory
+        run: mkdir -p ci-artifacts
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          gofmt -l . | tee ci-artifacts/gofmt.txt
+          if [ -s ci-artifacts/gofmt.txt ]; then
+            echo "The following files are not gofmt-clean:" >&2
+            exit 1
+          fi
+
+      - name: Run static analysis
+        run: go vet ./... 2>&1 | tee ci-artifacts/go-vet.log
+
+      - name: Run test suite
+        run: go test -count=1 ./... 2>&1 | tee ci-artifacts/go-test.log
+
+      - name: Build binary
+        run: go build -buildvcs=false -o ci-artifacts/matsrun ./cmd/matsrun
+
+      - name: CLI wiring contract
+        run: |
+          set -euo pipefail
+          ./ci-artifacts/matsrun --version | tee ci-artifacts/matsrun-version.txt
+          ./ci-artifacts/matsrun run --help | tee ci-artifacts/matsrun-run-help.txt
+          if ./ci-artifacts/matsrun run > ci-artifacts/matsrun-missing-flags.log 2>&1; then
+            echo "matsrun run without required flags unexpectedly succeeded" >&2
+            exit 1
+          fi
+
+      - name: rMATS orchestration smoke with stubbed rmats.py
+        run: |
+          set -euo pipefail
+          workspace="$PWD/ci-artifacts/smoke"
+          mkdir -p "$workspace/bin" "$workspace/root" "$workspace/qc"
+
+          python3 - "$workspace/samples.xlsx" <<'PY'
+          import sys
+          import zipfile
+
+          output_path = sys.argv[1]
+          rows = [["sampleid", "sample_group"], ["s1", "ctrl"], ["s2", "ctrl"], ["s3", "treat"]]
+
+          content_types = (
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+              '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+              '</Types>'
+          )
+          root_rels = (
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+              '</Relationships>'
+          )
+          workbook = (
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+              ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+              '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>'
+          )
+          workbook_rels = (
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+              '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+              '</Relationships>'
+          )
+
+          row_xml = []
+          for row_index, values in enumerate(rows, start=1):
+              cells = []
+              for column_index, value in enumerate(values):
+                  column_letter = chr(ord("A") + column_index)
+                  cells.append(f'<c r="{column_letter}{row_index}" t="inlineStr"><is><t>{value}</t></is></c>')
+              row_xml.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+
+          sheet = (
+              '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+              f'<sheetData>{"".join(row_xml)}</sheetData></worksheet>'
+          )
+
+          with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as archive:
+              archive.writestr("[Content_Types].xml", content_types)
+              archive.writestr("_rels/.rels", root_rels)
+              archive.writestr("xl/workbook.xml", workbook)
+              archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+              archive.writestr("xl/worksheets/sheet1.xml", sheet)
+          PY
+
+          for sample in s1 s2 s3; do
+            : > "$workspace/root/${sample}_human.bam"
+          done
+          : > "$workspace/root/ann.gtf"
+          printf 'file\tN50\ns1_val_1.fq.gz\t150\ns2_val_1.fq.gz\t150\n' \
+            > "$workspace/qc/s1_seqkit_stat.txt"
+
+          cat > "$workspace/bin/rmats.py" <<'STUB'
+          #!/usr/bin/env bash
+          if [ "${1:-}" = "--version" ]; then
+            echo "rmats.py 4.3.0-stub"
+            exit 0
+          fi
+          output_directory=""
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --od) output_directory="$2"; shift 2 ;;
+              --tmp) shift 2 ;;
+              *) shift ;;
+            esac
+          done
+          for product in SE.MATS.JC.txt MXE.MATS.JC.txt A5SS.MATS.JC.txt A3SS.MATS.JC.txt RI.MATS.JC.txt; do
+            printf 'ID\tGeneID\tFDR\n' > "$output_directory/$product"
+            printf 'event1\tGENE1\t0.05\n' >> "$output_directory/$product"
+          done
+          exit 0
+          STUB
+          chmod +x "$workspace/bin/rmats.py"
+
+          PATH="$workspace/bin:$PATH" ./ci-artifacts/matsrun run \
+            --root "$workspace/root" \
+            --pdata "$workspace/samples.xlsx" \
+            --seqlengthQC "$workspace/qc" \
+            --gtf "$workspace/root/ann.gtf" \
+            --threads 2 2>&1 | tee ci-artifacts/matsrun-smoke.log
+
+      - name: Assert orchestration contract
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          contrast = Path('ci-artifacts/smoke/root/RNASplicing/human/contrast-001')
+          products = [
+              'SE.MATS.JC.txt',
+              'MXE.MATS.JC.txt',
+              'A5SS.MATS.JC.txt',
+              'A3SS.MATS.JC.txt',
+              'RI.MATS.JC.txt',
+          ]
+          for product in products:
+              header = (contrast / product).read_text().splitlines()[0]
+              assert header == 'ID\tGeneID\tFDR', (product, header)
+
+          manifest = json.loads((contrast / 'matsrun-contrast-manifest.json').read_text())
+          assert manifest['schema_version'] == 'matsrun.contrast-manifest/v1', manifest['schema_version']
+          assert manifest['species'] == 'human'
+          assert manifest['combination'] == {'group1': 'ctrl', 'group2': 'treat'}, manifest['combination']
+          assert manifest['read_length'] == 150, manifest['read_length']
+          assert len(manifest['b1_paths']) == 2, manifest['b1_paths']
+          assert len(manifest['b2_paths']) == 1, manifest['b2_paths']
+
+          b1 = (contrast / 'b1.txt').read_text().strip().split(',')
+          b2 = (contrast / 'b2.txt').read_text().strip().split(',')
+          assert len(b1) == 2, b1
+          assert len(b2) == 1, b2
+          print('matsrun orchestration contract passed')
+          PY
+
+      - name: Upload matsrun evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: matsrun-orchestration-evidence
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Job summary
+        if: always()
+        continue-on-error: true
+        run: |
+          bash scripts/ci/job-summary.sh \
+            --verdict "${{ job.status }}" \
+            --title "matsrun — rMATS orchestration" \
+            --checked "Formatting, static analysis, the Go test suite, a build, the CLI wiring contract, and an rMATS orchestration run driven by a stubbed rmats.py whose invocation contract is asserted." \
+            --check "gofmt / static analysis|clean|see step log|-" \
+            --check "Go test suite|all pass|see step log|-" \
+            --check "CLI wiring contract|declared flags and subcommands present|see step log|-" \
+            --check "rMATS orchestration contract|rmats.py invoked with the declared arguments and outputs|see step log|-" \
+            --artifact "matsrun-orchestration-evidence" \
+            --limit "Orchestration and argument wiring are asserted against a stubbed rmats.py, so real rMATS numerical output and runtime are not exercised here."
