@@ -48,6 +48,13 @@ go build -o matsrun ./cmd/matsrun
 ./matsrun --help
 ```
 
+### Prerequisite: rMATS
+
+Execution requires `rmats.py` on `PATH` (matsrun invokes it directly and probes
+`rmats.py --version`); an rMATS build supporting `--variable-read-length` is
+expected. Without it the build succeeds but every contrast task fails at run
+time.
+
 ## Quick start
 
 ```bash
@@ -74,7 +81,7 @@ matsrun run \
 
 - `--root` is the BAM root; ordinary mode scans the root directory and PDX mode scans `Filtered_bams/`.
 - `--pdata` is an Excel workbook whose first sheet contains `sampleid` plus `sample_group` or `condition`.
-- Chinese aliases such as `样本编号`, `样本分组`, and `条件` are normalized.
+- Column aliases are normalized: `sampleid`/`sample_id`/`样本编号`/`样本ID`, `sample_group`/`group`/`样本分组`/`分组`, and `condition`/`treatment`/`条件`.
 - `--seqlengthQC` contains `*_seqkit_stat.txt` files used to derive a common read length.
 - `--gtf` is the annotation passed to `rmats.py`.
 - At least two non-empty groups are required.
@@ -85,9 +92,13 @@ Each species and pairwise group combination is written below:
 
 ```text
 <root>/RNASplicing/<species>/contrast-001/
-├── temp/
-└── <rMATS outputs>
+└── <rMATS outputs>   # SE/A3SS/A5SS/MXE/RI tables plus manifest.json
 ```
+
+Each contrast is executed in a staging directory (with a transient `temp/`)
+and published atomically after its products are validated; `temp/` never
+appears in the published tree. `manifest.json` records the exact `rmats.py`
+invocation, the group BAM lists, and the validated product set.
 
 The number of tasks is `number of species × number of pairwise group combinations`. A run returns a non-zero status if one or more contrast tasks fail and reports each failed task.
 
