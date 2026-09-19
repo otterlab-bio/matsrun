@@ -17,18 +17,19 @@ import (
 )
 
 var (
-	flagRoot        string
-	flagThreads     int
-	flagPdata       string
-	flagSeqLengthQC string
-	flagGTF         string
-	flagPDXMode     string
+	flagRoot              string
+	flagThreads           int
+	flagPdata             string
+	flagSeqLengthQC       string
+	flagSeqLengthQCFormat string
+	flagGTF               string
+	flagPDXMode           string
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run rMATS pairwise splicing analysis",
-	Long: `Scan BAM files, compute read length from seqkit stats, and execute
+	Long: `Scan BAM files, compute read length from native SeqKit or fastqcx QC reports, and execute
 rmats.py for every pairwise group combination × species.`,
 	RunE: runMain,
 	Args: cobra.NoArgs,
@@ -38,7 +39,8 @@ func init() {
 	runCmd.Flags().StringVar(&flagRoot, "root", "", "Root directory containing BAM files (required)")
 	runCmd.Flags().IntVar(&flagThreads, "threads", 10, "Number of threads passed to rmats.py")
 	runCmd.Flags().StringVar(&flagPdata, "pdata", "", "Path to pdata.xlsx (required)")
-	runCmd.Flags().StringVar(&flagSeqLengthQC, "seqlengthQC", "", "Directory containing *_seqkit_stat.txt files (required)")
+	runCmd.Flags().StringVar(&flagSeqLengthQC, "seqlengthQC", "", "Directory containing read-length QC reports (required)")
+	runCmd.Flags().StringVar(&flagSeqLengthQCFormat, "seqlength-qc-format", "auto", "Read-length QC format: auto, seqkit, or fastqcx")
 	runCmd.Flags().StringVar(&flagGTF, "gtf", "", "Path to GTF annotation file (required)")
 	runCmd.Flags().StringVar(&flagPDXMode, "pdxmode", "0", `PDX mode: "1" = scan Filtered_bams/, "0" = scan root dir`)
 
@@ -108,9 +110,13 @@ func runMain(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("matsrun: no BAM files matched; check --root and --pdxmode")
 	}
 
-	// 4. Compute read length from seqkit stats.
-	fmt.Fprintf(os.Stderr, ">> matsrun: computing read length from %q\n", flagSeqLengthQC)
-	readLength, err := seqkit.ComputeReadLength(flagSeqLengthQC)
+	// 4. Compute read length from one declared QC report layout.
+	qcFormat, err := seqkit.ParseFormat(flagSeqLengthQCFormat)
+	if err != nil {
+		return fmt.Errorf("matsrun: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, ">> matsrun: computing read length from %q (%s)\n", flagSeqLengthQC, qcFormat)
+	readLength, err := seqkit.ComputeReadLengthWithFormat(flagSeqLengthQC, qcFormat)
 	if err != nil {
 		return fmt.Errorf("matsrun: %w", err)
 	}

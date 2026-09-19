@@ -2,7 +2,7 @@
 
 **A Go CLI that turns grouped BAM inputs into reproducible rMATS pairwise splicing runs.**
 
-`matsrun` reads sample groups from an Excel pdata file, discovers BAM inputs, derives read length from SeqKit QC statistics, creates every pairwise group contrast, and invokes `rmats.py` once per contrast and species.
+`matsrun` reads sample groups from an Excel pdata file, discovers BAM inputs, derives rMATS read length from native SeqKit statistics or fastqcx's embedded SeqKit-compatible summary, creates every pairwise group contrast, and invokes `rmats.py` once per contrast and species.
 
 ## Proof
 
@@ -34,7 +34,7 @@ taken from the SeqKit statistics, and the exact `rmats.py` invocation (excerpted
 ## Where it fits
 
 ```text
-RNA-seq BAMs + pdata + SeqKit QC + GTF → matsrun → rmats.py → RNASplicing/<species>/<contrast>
+RNA-seq BAMs + pdata + trimmed-read QC (SeqKit or fastqcx) + GTF → matsrun → rmats.py → RNASplicing/<species>/<contrast>
 ```
 
 The tool orchestrates rMATS; it does not implement the rMATS statistical model.
@@ -47,6 +47,13 @@ cd matsrun
 go build -o matsrun ./cmd/matsrun
 ./matsrun --help
 ```
+
+### Prerequisite: rMATS
+
+Execution requires `rmats.py` on `PATH` (matsrun invokes it directly and probes
+`rmats.py --version`); an rMATS build supporting `--variable-read-length` is
+expected. Without it the build succeeds but every contrast task fails at run
+time.
 
 ## Quick start
 
@@ -74,8 +81,11 @@ matsrun run \
 
 - `--root` is the BAM root; ordinary mode scans the root directory and PDX mode scans `Filtered_bams/`.
 - `--pdata` is an Excel workbook whose first sheet contains `sampleid` plus `sample_group` or `condition`.
-- Chinese aliases such as `样本编号`, `样本分组`, and `条件` are normalized.
-- `--seqlengthQC` contains `*_seqkit_stat.txt` files used to derive a common read length.
+- Column aliases are normalized: `sampleid`/`sample_id`/`样本编号`/`样本ID`, `sample_group`/`group`/`样本分组`/`分组`, and `condition`/`treatment`/`条件`.
+- `--seqlengthQC` is the directory containing one read-length QC layout:
+  - native SeqKit `*_seqkit_stat.txt` reports, where matsrun averages N50 values from rows whose `file` contains `_val_`; or
+  - fastqcx `*_fastqcx/fastqc_data.txt` reports, where matsrun averages N50 values from each `Seqkit Statistics` module. The chosen fastqcx directory is itself the trimmed-read scope, so filenames are not filtered again.
+- `--seqlength-qc-format auto|seqkit|fastqcx` defaults to `auto`. Auto-detection rejects directories containing both layouts, preventing a silent double count. Pass `fastqcx` in an OTTER/Craftmake RNA workflow.
 - `--gtf` is the annotation passed to `rmats.py`.
 - At least two non-empty groups are required.
 
@@ -85,9 +95,13 @@ Each species and pairwise group combination is written below:
 
 ```text
 <root>/RNASplicing/<species>/contrast-001/
-├── temp/
-└── <rMATS outputs>
+└── <rMATS outputs>   # SE/A3SS/A5SS/MXE/RI tables plus manifest.json
 ```
+
+Each contrast is executed in a staging directory (with a transient `temp/`)
+and published atomically after its products are validated; `temp/` never
+appears in the published tree. `manifest.json` records the exact `rmats.py`
+invocation, the group BAM lists, and the validated product set.
 
 The number of tasks is `number of species × number of pairwise group combinations`. A run returns a non-zero status if one or more contrast tasks fail and reports each failed task.
 
